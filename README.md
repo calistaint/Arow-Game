@@ -4,6 +4,8 @@
 
 A top-down arena shooter built on Pygame. This project serves as a comprehensive template demonstrating complex game mechanics, including procedural waves, diverse enemy types, power-ups, smooth camera controls, and a custom UI.
 
+https://calistainteractive.itch.io/arow-but-better
+
 ## Features
 
 *   **Procedural Wave System:** Enemies spawn in increasing numbers and diversity across continuous waves.
