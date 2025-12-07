@@ -3,10 +3,29 @@ from pygame.locals import *
 import math
 import random
 from PIL import Image, ImageFilter
-import sys 
-import os  
+import sys
+import os
+import ctypes
+
+# Enable High DPI on Windows
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    pass
+
+# Fix Taskbar Icon on Windows
+try:
+    myappid = 'arow.game.version.1.5' 
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+except Exception:
+    pass
 
 pygame.init()
+try:
+    icon_game = pygame.image.load(resource_path("arowicon.png"))
+    pygame.display.set_icon(icon_game)
+except Exception as e:
+    print("Warning: Icon not loaded:", e)
 
 info = pygame.display.Info()
 NATIVE_WIDTH, NATIVE_HEIGHT = info.current_w, info.current_h
@@ -20,7 +39,7 @@ if fullscreen:
 else:
     screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE) 
 
-pygame.display.set_caption("Arow - Press B to toggle Bloom")
+pygame.display.set_caption("Arow - but better!")
 
 WHITE, BLACK, RED = (255, 255, 255), (30, 30, 30), (255, 50, 50)
 BLUE, YELLOW, GREEN = (100, 150, 255), (255, 255, 0), (0, 255, 0)
@@ -101,6 +120,66 @@ class Particle(pygame.sprite.Sprite):
         if self.lifespan <= 0: self.kill()
         self.image.set_alpha(int(255 * (self.lifespan / self.initial_lifespan)))
 
+# Optimized Trail using image blitting
+trail_particle_cache = {}
+
+def get_trail_particle(radius, color, alpha):
+    key = (radius, color, alpha)
+    if key not in trail_particle_cache:
+        surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+        pygame.draw.circle(surf, (*color, alpha), (radius, radius), radius)
+        trail_particle_cache[key] = surf
+    return trail_particle_cache[key]
+
+class Trail:
+    def __init__(self, color, max_length=15, start_width=10, end_width=2):
+        self.points = []
+        self.color = color
+        self.max_length = max_length
+        self.start_width = start_width
+        self.end_width = end_width
+        self.timer = 0
+
+    def update(self, pos):
+        # Add points based on distance
+        moved = False
+        if not self.points or pos.distance_to(self.points[-1]) > 5:
+            self.points.append(pygame.math.Vector2(pos))
+            moved = True
+            if len(self.points) > self.max_length:
+                self.points.pop(0) # Maintain max length while moving
+            self.timer = 0 # Reset idle timer on move
+        
+        # If not moved for a while, retract
+        if not moved and self.points:
+            self.timer += 1
+            if self.timer > 10: # Wait 10 frames of idleness before retracting
+                self.points.pop(0)
+
+    def draw(self, surface, camera):
+        if len(self.points) < 2: return
+        
+        # Draw backward so head is on top
+        for i, point in enumerate(self.points):
+            prog = i / len(self.points) # 0 at tail, 1 at head
+            
+            radius = int((self.end_width + (self.start_width - self.end_width) * prog) / 2)
+            alpha = int(255 * prog) # Fade out tail entirely
+            
+            if radius < 1: continue
+            
+            # Simple optimization: Don't draw if fully transparent
+            if alpha < 10: continue
+
+            particle = get_trail_particle(radius, self.color, alpha)
+            
+            draw_pos = point - camera - pygame.math.Vector2(radius, radius)
+            surface.blit(particle, draw_pos)
+
+
+
+
+
 class Player(pygame.sprite.Sprite):
     def __init__(self):
         super().__init__()
@@ -122,7 +201,8 @@ class Player(pygame.sprite.Sprite):
         self.dash_charges, self.max_dash_charges, self.is_dashing = 1, 3, False
         self.dash_timer, self.dash_duration, self.dash_speed = 0, 8, 20
         self.has_plasma_ball, self.rapid_fire_active = False, False
-        self.last_move_direction = pygame.math.Vector2(1, 0) 
+        self.last_move_direction = pygame.math.Vector2(1, 0)
+        self.trail = Trail(CYAN, max_length=25, start_width=12, end_width=2) 
 
         self.rotated_images = {}
         for angle in range(360):
@@ -159,7 +239,8 @@ class Player(pygame.sprite.Sprite):
                 move_vec.normalize_ip();
                 self.pos += move_vec * self.speed
                 self.last_move_direction = move_vec 
-                create_particles(self.pos + pygame.math.Vector2(-15, 0).rotate(-self.angle), 1, ORANGE, 1, 3, 15, 25)
+                self.trail.update(self.pos)
+                # create_particles(self.pos + pygame.math.Vector2(-15, 0).rotate(-self.angle), 1, ORANGE, 1, 3, 15, 25) # REMOVED OLD TRAIL
 
         map_rect = pygame.Rect((MAP_WIDTH - current_map_size) / 2, (MAP_HEIGHT - current_map_size) / 2,
                                current_map_size, current_map_size)
@@ -208,7 +289,7 @@ class Bullet(pygame.sprite.Sprite):
     def update(self):
         self.pos += self.velocity;
         self.rect.center = self.pos
-        create_particles(self.rect.center, 1, self.color, 0.5, 1, 5, 10)
+        # create_particles(self.rect.center, 1, self.color, 0.5, 1, 5, 10) # Removed for performance
         if not pygame.Rect(0, 0, MAP_WIDTH, MAP_HEIGHT).contains(self.rect): self.kill()
 
 class PlasmaBall(pygame.sprite.Sprite):
@@ -265,13 +346,31 @@ class Enemy(pygame.sprite.Sprite):
                 size, self.color, self.speed, self.health, self.score_value = 28, ORANGE, 1.0, 2, 15
             elif enemy_type == "sniper":
                 size, self.color, self.speed, self.health, self.score_value = 30, PURPLE, 0.7, 4, 30
+            elif enemy_type == "tank":
+                size, self.color, self.speed, self.health, self.score_value = 50, (50, 100, 50), 0.5, 12, 50
+            elif enemy_type == "kamikaze":
+                size, self.color, self.speed, self.health, self.score_value = 25, (255, 100, 100), 2.8, 1, 20
+            elif enemy_type == "turret":
+                size, self.color, self.speed, self.health, self.score_value = 40, (100, 100, 100), 0, 8, 40
+            elif enemy_type == "splitter":
+                size, self.color, self.speed, self.health, self.score_value = 35, (0, 255, 200), 1.2, 5, 25
+
             self.image = pygame.Surface((size, size), pygame.SRCALPHA)
-            pygame.draw.circle(self.image, self.color, (size // 2, size // 2), size // 2)
-            pygame.draw.circle(self.image, BLACK, (size // 2, size // 2), size // 4)
+            if enemy_type == "turret":
+                 pygame.draw.rect(self.image, self.color, (0,0,size,size), border_radius=5)
+                 pygame.draw.circle(self.image, RED, (size//2, size//2), size//4)
+            else:
+                 pygame.draw.circle(self.image, self.color, (size // 2, size // 2), size // 2)
+                 pygame.draw.circle(self.image, BLACK, (size // 2, size // 2), size // 4)
             self.rect, self.pos = self.image.get_rect(center=(x, y)), pygame.math.Vector2(x, y)
 
         if enemy_type == "shooter":
             self.shoot_timer, self.shoot_cooldown = random.randint(0, 150), 150
+        elif enemy_type == "tank":
+            self.shoot_timer, self.shoot_cooldown = random.randint(0, 200), 200
+        elif enemy_type == "turret":
+            self.cooldown_timer = 90
+            self.lifespan = 900 # 15 seconds at 60 FPS
         elif enemy_type == "sniper":
             self.state, self.aim_timer, self.aim_duration = "roaming", 0, 120
             self.warn_timer, self.warn_duration, self.locked_target_pos = 0, 90, None
@@ -284,6 +383,12 @@ class Enemy(pygame.sprite.Sprite):
 
         if self.enemy_type == "charger":
             self.pos += direction.normalize() * self.speed
+        elif self.enemy_type == "kamikaze":
+             self.pos += direction.normalize() * self.speed
+             if dist < 30: # explode on contact
+                 self.kill()
+                 create_particles(self.rect.center, 20, RED, 2, 8, 20, 50)
+                 player.take_damage(1)
         elif self.enemy_type == "shooter":
             desired_dist = 400
             if dist > desired_dist:
@@ -295,6 +400,20 @@ class Enemy(pygame.sprite.Sprite):
                 self.shoot_timer = 0
                 bullets.add(
                     Bullet(self.rect.center, math.degrees(math.atan2(-direction.y, direction.x)), True, self.color))
+        elif self.enemy_type == "tank":
+            if dist > 300: self.pos += direction.normalize() * self.speed
+            self.shoot_timer += 1
+            if self.shoot_timer >= self.shoot_cooldown:
+                self.shoot_timer = 0
+                angle = math.degrees(math.atan2(-direction.y, direction.x))
+                for offset in [-15, 0, 15]:
+                    bullets.add(Bullet(self.rect.center, angle + offset, True, self.color))
+        elif self.enemy_type == "turret":
+            self.update_turret(player, direction, dist, bullets)
+            self.lifespan -= 1
+            if self.lifespan <= 0: self.kill()
+        elif self.enemy_type == "splitter":
+            self.update_splitter(player, direction, dist)
         elif self.enemy_type == "sniper":
             self.update_sniper(player, direction, dist, all_sprites_group)
         self.rect.center = self.pos
@@ -312,8 +431,9 @@ class Enemy(pygame.sprite.Sprite):
             if self.warn_timer <= 0:
                 if self.locked_target_pos:
                     create_particles(self.rect.center, 40, PURPLE, 2, 7, 15, 30);
-                    create_particles(self.rect.center, 20, WHITE, 1, 4, 10, 20)
+                    # create_particles(self.rect.center, 20, WHITE, 1, 4, 10, 20)
                     beam_dir = self.locked_target_pos - self.pos
+                    # Beam length and width can be optimized
                     beam = EnergyBeam(self.pos + beam_dir.normalize() * 1000,
                                       math.degrees(math.atan2(-beam_dir.y, beam_dir.x)), 2000, 40)
                     all_sprites_group.add(beam);
@@ -323,22 +443,60 @@ class Enemy(pygame.sprite.Sprite):
             self.cooldown_timer -= 1
             if self.cooldown_timer <= 0: self.state = "roaming"
 
+    def update_turret(self, player, direction, dist, bullets):
+        # Turret rotates slowly towards player and shoots heavy shots
+        if dist < 600:
+             self.cooldown_timer -= 1
+             if self.cooldown_timer <= 0:
+                 self.cooldown_timer = 90
+                 angle = math.degrees(math.atan2(-direction.y, direction.x))
+                 bullets.add(Bullet(self.rect.center, angle, True, self.color))
+                 bullets.add(Bullet(self.rect.center, angle+10, True, self.color))
+                 bullets.add(Bullet(self.rect.center, angle-10, True, self.color))
+
+    def update_splitter(self, player, direction, dist):
+        self.pos += direction.normalize() * self.speed
+
     def take_damage(self, amount):
+        global enemies
         self.health -= amount
-        if self.health <= 0: self.kill(); return True
+        if self.health <= 0: 
+            if self.enemy_type == "splitter":
+                # Split into 2 small chargers
+                for _ in range(2):
+                    offset = pygame.math.Vector2(random.uniform(-20, 20), random.uniform(-20, 20))
+                    enemies.add(Enemy(self.pos.x + offset.x, self.pos.y + offset.y, "charger"))
+            self.kill(); 
+            return True
         return False
 
 class Boss(Enemy):
     def __init__(self, x, y):
         super().__init__(x, y, "boss")
-        self.image = pygame.Surface((80, 80), pygame.SRCALPHA)
+        self.image = pygame.Surface((100, 100), pygame.SRCALPHA)
+        self.boss_variant = random.choice(["standard", "summoner", "rusher"])
+        
+        self.enemy_type = "boss"
         self.color = (200, 0, 0)
-        pygame.draw.rect(self.image, self.color, self.image.get_rect(), border_radius=10)
-        pygame.draw.circle(self.image, YELLOW, (40, 40), 15)
         self.rect, self.pos = self.image.get_rect(center=(x, y)), pygame.math.Vector2(x, y)
-        self.health, self.max_health, self.score_value = 350, 350, 1000  
+        
+        if self.boss_variant == "summoner": 
+            self.color = (138, 43, 226) # Blue Violet
+            pygame.draw.polygon(self.image, self.color, [(50, 0), (100, 50), (50, 100), (0, 50)]) # Rhombus
+            pygame.draw.circle(self.image, WHITE, (50, 50), 20)
+        elif self.boss_variant == "rusher": 
+            self.color = (255, 69, 0) # Red Orange
+            pygame.draw.polygon(self.image, self.color, [(0, 0), (100, 0), (50, 100)]) # Triangle down
+            pygame.draw.circle(self.image, YELLOW, (50, 30), 10)
+        else:
+            pygame.draw.rect(self.image, self.color, self.image.get_rect(), border_radius=15)
+            pygame.draw.circle(self.image, YELLOW, (50, 50), 20)
+
+        self.health, self.max_health, self.score_value = 330, 330, 1000  
         self.stage = 1
         self.action_timer, self.locked_target_pos = 0, None
+        self.rush_target, self.is_rushing = None, False
+        self.spawned_turrets = pygame.sprite.Group() # Track turrets
         self.update_stage_attributes()
 
     def update_stage_attributes(self):
@@ -377,15 +535,58 @@ class Boss(Enemy):
         if self.laser_state:
             self.handle_laser_logic(player, all_sprites_group)
         else:
-            if self.stage == 3 and self.action_timer % self.laser_cooldown == 0:
-                self.laser_state, self.laser_aim_timer, self.triple_laser_count = "aiming", 120, 0
-            elif self.stage < 3 and self.action_timer % self.laser_cooldown == 0:
-                self.laser_state, self.laser_aim_timer = "aiming", 120
-            elif self.action_timer % self.nova_cooldown == 0:
-                for i in range(16): bullets.add(Bullet(self.rect.center, i * 22.5, True, ORANGE))
-            elif self.action_timer % self.shoot_cooldown == 0:
-                angle = math.degrees(math.atan2(-direction.y, direction.x))
-                for i in range(-2, 3): bullets.add(Bullet(self.rect.center, angle + i * 15, True, self.color))
+            if self.boss_variant == "summoner":
+                if self.action_timer % 300 == 0:
+                    # Clear dead turrets from group
+                    for t in list(self.spawned_turrets):
+                        if not t.alive(): self.spawned_turrets.remove(t)
+
+                    # Spawn Turrets if under limit (Limit: 3 * Stage)
+                    if len(self.spawned_turrets) < self.stage * 3:
+                        for _ in range(self.stage):
+                             ex, ey = self.pos.x + random.randint(-200, 200), self.pos.y + random.randint(-200, 200)
+                             turret = Enemy(ex, ey, "turret")
+                             enemies.add(turret)
+                             self.spawned_turrets.add(turret)
+                
+                # Orbiting shield balls (visual only for now or projectiles)
+                if self.action_timer % 120 == 0:
+                     for i in range(8):
+                         angle = i * 45 + self.action_timer
+                         bullets.add(Bullet(self.rect.center, angle, True, CYAN))
+
+            elif self.boss_variant == "rusher":
+                if not self.is_rushing:
+                    # Prepare rush
+                    if self.action_timer % 200 == 0:
+                        self.is_rushing = True
+                        self.rush_target = player.pos.copy()
+                        create_particles(self.rect.center, 50, WHITE, 2, 5, 20, 30)
+                else:
+                    # Rush towards target
+                    rush_dir = self.rush_target - self.pos
+                    if rush_dir.length() < 20 or self.action_timer % 200 > 60: # Stop after frame count or reach
+                        self.is_rushing = False
+                        # Explosion of bullets on stop
+                        for i in range(24): bullets.add(Bullet(self.rect.center, i*15, True, RED))
+                        screen_shake = 20
+                    else:
+                        self.pos += rush_dir.normalize() * (self.speed * 5) # FAST
+                        self.rect.center = self.pos # Update rect for collision immediately
+                        if self.rect.colliderect(player.rect):
+                            player.take_damage(1)
+
+            # Standard Boss / Fallback Attacks
+            if self.boss_variant == "standard":
+                if self.stage == 3 and self.action_timer % self.laser_cooldown == 0:
+                    self.laser_state, self.laser_aim_timer, self.triple_laser_count = "aiming", 120, 0
+                elif self.stage < 3 and self.action_timer % self.laser_cooldown == 0:
+                    self.laser_state, self.laser_aim_timer = "aiming", 120
+                elif self.action_timer % self.nova_cooldown == 0:
+                    for i in range(16): bullets.add(Bullet(self.rect.center, i * 22.5, True, ORANGE))
+                elif self.action_timer % self.shoot_cooldown == 0:
+                    angle = math.degrees(math.atan2(-direction.y, direction.x))
+                    for i in range(-2, 3): bullets.add(Bullet(self.rect.center, angle + i * 15, True, self.color))
 
     def handle_laser_logic(self, player, all_sprites_group):
         if self.laser_state == "aiming":
@@ -721,16 +922,22 @@ while running:
                     for _ in range(enemies_per_wave):
                         map_rect = pygame.Rect((MAP_WIDTH - current_map_size) / 2, (MAP_HEIGHT - current_map_size) / 2,
                                                current_map_size, current_map_size)
-                        edge = random.choice(['top', 'bottom', 'left', 'right'])
-                        if edge == 'top':
-                            x, y = random.uniform(map_rect.left, map_rect.right), map_rect.top
-                        elif edge == 'bottom':
-                            x, y = random.uniform(map_rect.left, map_rect.right), map_rect.bottom
-                        elif edge == 'left':
-                            x, y = map_rect.left, random.uniform(map_rect.top, map_rect.bottom)
+                        enemy_type = random.choice(["charger", "charger", "shooter", "shooter", "sniper", "tank", "kamikaze", "kamikaze", "splitter", "turret"])
+                        if enemy_type == "turret":
+                            # Spawn turrets closer to center (random point in map)
+                            x = random.uniform(map_rect.left + 200, map_rect.right - 200)
+                            y = random.uniform(map_rect.top + 200, map_rect.bottom - 200)
                         else:
-                            x, y = map_rect.right, random.uniform(map_rect.top, map_rect.bottom)
-                        enemies.add(Enemy(x, y, random.choice(["charger", "shooter", "shooter", "sniper"])))
+                            edge = random.choice(['top', 'bottom', 'left', 'right'])
+                            if edge == 'top':
+                                x, y = random.uniform(map_rect.left, map_rect.right), map_rect.top
+                            elif edge == 'bottom':
+                                x, y = random.uniform(map_rect.left, map_rect.right), map_rect.bottom
+                            elif edge == 'left':
+                                x, y = map_rect.left, random.uniform(map_rect.top, map_rect.bottom)
+                            else:
+                                x, y = map_rect.right, random.uniform(map_rect.top, map_rect.bottom)
+                        enemies.add(Enemy(x, y, enemy_type))
             elif len(enemies) == 0:
                 wave_timer += 1
 
@@ -772,6 +979,9 @@ while running:
             elif boss.laser_state == 'warning' and boss.laser_warn_timer % 10 < 5:
                 pygame.draw.circle(game_surf, WHITE, (boss.rect.centerx - camera.x, boss.rect.centery - camera.y),
                                    boss.rect.width / 2)
+
+        if hasattr(player, 'trail'):
+            player.trail.draw(game_surf, camera)
 
         for group in [enemies, boss_group, bullets, plasma_balls, powerups, particles, beams, [player]]:
             for sprite in group: game_surf.blit(sprite.image, (sprite.rect.x - camera.x, sprite.rect.y - camera.y))
