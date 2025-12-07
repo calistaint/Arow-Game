@@ -7,6 +7,15 @@ import sys
 import os
 import ctypes
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
 # Enable High DPI on Windows
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -67,7 +76,18 @@ camera_smooth_factor = 0.08
 
 custom_start_wave_str = "1"
 wave_input_active = False
+
 custom_powerups = {'dash_charge': False, 'rapid_fire': False, 'plasma_ball': False}
+
+# Advanced Settings Globals
+adv_settings = {
+    'enemy_health': 1.0, # Multiplier
+    'enemy_firerate': 1.0, # Multiplier (lower is faster cd, so technically cooldown multiplier)
+    'spawn_count_mult': 1.0, # Multiplier for enemies per wave
+    'infinite_health': False
+}
+adv_input_active = None # Key of setting being edited or None
+adv_input_str = ""
 
 splash_screen_active = True 
 splash_start_time = 0 
@@ -77,15 +97,7 @@ fade_out_duration = 500
 splash_image = None 
 splash_rect = None 
 
-def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    try:
 
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-
-    return os.path.join(base_path, relative_path)
 
 def create_particles(position, count, color, min_speed, max_speed, min_life, max_life):
     if len(particles) > PARTICLE_LIMIT - count: return
@@ -271,6 +283,7 @@ class Player(pygame.sprite.Sprite):
         return pygame.time.get_ticks() - self.last_shot_time > cooldown and self.ammo > 0 and not self.reloading
 
     def take_damage(self, amount):
+        if adv_settings['infinite_health']: return False
         if not self.is_dashing:
             self.health -= amount
             if self.health <= 0: return True
@@ -364,15 +377,24 @@ class Enemy(pygame.sprite.Sprite):
                  pygame.draw.circle(self.image, BLACK, (size // 2, size // 2), size // 4)
             self.rect, self.pos = self.image.get_rect(center=(x, y)), pygame.math.Vector2(x, y)
 
+        # Apply Advanced Settings
+        if hasattr(self, 'health'):
+             self.health = int(self.health * adv_settings['enemy_health'])
+             self.score_value = int(self.score_value * adv_settings['enemy_health']) # More health = more score
+        
+        # Apply Cooldown Multiplier (Fire Rate)
+        cd_mult = adv_settings['enemy_firerate']
+        
         if enemy_type == "shooter":
-            self.shoot_timer, self.shoot_cooldown = random.randint(0, 150), 150
+            self.shoot_timer, self.shoot_cooldown = random.randint(0, 150), int(150 * cd_mult)
         elif enemy_type == "tank":
-            self.shoot_timer, self.shoot_cooldown = random.randint(0, 200), 200
+            self.shoot_timer, self.shoot_cooldown = random.randint(0, 200), int(200 * cd_mult)
         elif enemy_type == "turret":
-            self.cooldown_timer = 90
+            self.cooldown_timer = int(90 * cd_mult)
             self.lifespan = 900 # 15 seconds at 60 FPS
         elif enemy_type == "sniper":
-            self.state, self.aim_timer, self.aim_duration = "roaming", 0, 120
+            self.state, self.aim_timer, self.aim_duration = "roaming", 0, int(120 * cd_mult)
+            # Warn/Cooldown not strictly fire rate but pacing
             self.warn_timer, self.warn_duration, self.locked_target_pos = 0, 90, None
             self.cooldown_timer, self.cooldown_duration = 0, 120
 
@@ -471,10 +493,10 @@ class Enemy(pygame.sprite.Sprite):
         return False
 
 class Boss(Enemy):
-    def __init__(self, x, y):
+    def __init__(self, x, y, variant_override=None):
         super().__init__(x, y, "boss")
         self.image = pygame.Surface((100, 100), pygame.SRCALPHA)
-        self.boss_variant = random.choice(["standard", "summoner", "rusher"])
+        self.boss_variant = variant_override if variant_override else random.choice(["standard", "summoner", "rusher"])
         
         self.enemy_type = "boss"
         self.color = (200, 0, 0)
@@ -493,6 +515,10 @@ class Boss(Enemy):
             pygame.draw.circle(self.image, YELLOW, (50, 50), 20)
 
         self.health, self.max_health, self.score_value = 330, 330, 1000  
+        # Apply Adv Settings to Boss
+        self.health = int(self.health * adv_settings['enemy_health'])
+        self.max_health = int(self.max_health * adv_settings['enemy_health'])
+        
         self.stage = 1
         self.action_timer, self.locked_target_pos = 0, None
         self.rush_target, self.is_rushing = None, False
@@ -680,8 +706,17 @@ def reset_game(use_custom_settings=False):
     player = Player()
 
     if use_custom_settings:
-        start_wave = int(custom_start_wave_str) if custom_start_wave_str.isdigit() and custom_start_wave_str else 1
-        current_wave = max(0, start_wave - 1)
+        if custom_start_wave_str == "676767":
+             # EASTER EGG: ALL BOSSES
+             current_wave = 676767
+             boss_fight_active = True
+             boss_group.add(Boss(MAP_WIDTH/2 - 200, MAP_HEIGHT/2, "standard"))
+             boss_group.add(Boss(MAP_WIDTH/2, MAP_HEIGHT/2, "summoner"))
+             boss_group.add(Boss(MAP_WIDTH/2 + 200, MAP_HEIGHT/2, "rusher"))
+        else:
+             start_wave = int(custom_start_wave_str) if custom_start_wave_str.isdigit() and custom_start_wave_str else 1
+             current_wave = max(0, start_wave - 1)
+        
         if custom_powerups['dash_charge']: player.dash_charges = player.max_dash_charges
         if custom_powerups[
             'rapid_fire']: player.rapid_fire_active, player.rapid_fire_end_time = True, pygame.time.get_ticks() + 999999
@@ -695,16 +730,22 @@ def reset_game(use_custom_settings=False):
     all_sprites.add(player)
     score, wave_timer, boss_fight_active, boss_powerup_spawn_timer = 0, 0, False, 0
 
+def show_adv_settings(): global game_state; game_state = "advanced_settings"
+
 def update_ui_positions():
-    global btn_start, btn_fullscreen, btn_quit, btn_menu, btn_custom_start
+    global btn_start, btn_fullscreen, btn_quit, btn_menu, btn_custom_start, btn_adv_settings
     global wave_input_box, dash_checkbox, rapid_checkbox, plasma_checkbox
     global btn_resume, btn_smooth_camera, btn_toggle_fullscreen, btn_pause_to_main_menu, grid_surface
+    global btn_adv_back, adv_inputs
+    
     btn_start = Button(WIDTH // 2 - 150, HEIGHT // 2 - 80, 300, 60, "Start Game (Wave 1)", lambda: start_game(False), font_size=30)
     btn_fullscreen = Button(WIDTH // 2 - 150, HEIGHT // 2, 300, 60, "Toggle Fullscreen", toggle_fullscreen, font_size=30)
     btn_quit = Button(WIDTH // 2 - 150, HEIGHT // 2 + 80, 300, 60, "Quit", quit_game, font_size=30)
     btn_menu = Button(WIDTH - 130, HEIGHT - 60, 120, 50, "Menu", show_main_menu, font_size=24)
 
     btn_custom_start = Button(WIDTH // 2 - 150, HEIGHT - 140, 300, 50, "Start Custom Wave", lambda: start_game(True), font_size=30)
+    btn_adv_settings = Button(WIDTH // 2 + 160, HEIGHT - 140, 40, 50, "+", show_adv_settings, font_size=30) # Small + button next to Custom Start
+
     wave_input_box = pygame.Rect(WIDTH // 2 - 150, HEIGHT - 220, 140, 40)
     dash_checkbox = Button(WIDTH // 2 + 10, HEIGHT - 220, 90, 40, "Dash", toggle_dict=custom_powerups,
                            toggle_key='dash_charge', font_size=16)
@@ -718,10 +759,20 @@ def update_ui_positions():
     btn_toggle_fullscreen = Button(WIDTH // 2 - 150, HEIGHT // 2 + 140, 300, 60, "Toggle Fullscreen", toggle_fullscreen, font_size=30)
     btn_pause_to_main_menu = Button(WIDTH // 2 - 150, HEIGHT // 2 + 220, 300, 60, "Main Menu", show_main_menu, font_size=30)
 
+    # Advanced UI
+    btn_adv_back = Button(WIDTH // 2 - 100, HEIGHT - 80, 200, 50, "Back", show_main_menu, font_size=24)
+    # We will draw inputs manually or make buttons for them, let's define rects
+    adv_inputs = {
+        'enemy_health': pygame.Rect(WIDTH // 2 + 50, HEIGHT // 2 - 100, 100, 40),
+        'enemy_firerate': pygame.Rect(WIDTH // 2 + 50, HEIGHT // 2 - 40, 100, 40),
+        'spawn_count_mult': pygame.Rect(WIDTH // 2 + 50, HEIGHT // 2 + 20, 100, 40)
+    }
+
     grid_surface = create_grid_surface(WIDTH, HEIGHT, GRID_COLOR)
 
-btn_start, btn_fullscreen, btn_quit, btn_menu, btn_custom_start = None, None, None, None, None
+btn_start, btn_fullscreen, btn_quit, btn_menu, btn_custom_start, btn_adv_settings = None, None, None, None, None, None
 wave_input_box, dash_checkbox, rapid_checkbox, plasma_checkbox = None, None, None, None
+btn_adv_back, adv_inputs = None, None
 star_field = []
 camera, game_state = pygame.math.Vector2(0, 0), "splash" if splash_screen_active else "menu"
 if game_state == "splash": 
@@ -767,6 +818,19 @@ while running:
                     custom_start_wave_str = custom_start_wave_str[:-1]
                 elif event.unicode.isdigit():
                     custom_start_wave_str += event.unicode
+            elif game_state == "advanced_settings" and adv_input_active:
+                if event.key == pygame.K_BACKSPACE:
+                    adv_input_str = adv_input_str[:-1]
+                elif event.key == pygame.K_RETURN:
+                     # Apply
+                     try:
+                         val = float(adv_input_str)
+                         adv_settings[adv_input_active] = val
+                     except: pass
+                     adv_input_active = None
+                elif event.unicode.replace('.', '', 1).isdigit():
+                    adv_input_str += event.unicode
+                    
         if event.type == pygame.VIDEORESIZE and not fullscreen:
             WIDTH, HEIGHT = event.w, event.h;
             screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE);
@@ -774,9 +838,23 @@ while running:
 
         if game_state == "menu":
             for btn in [btn_start, btn_fullscreen, btn_quit, btn_custom_start, dash_checkbox, rapid_checkbox,
-                        plasma_checkbox]: btn.handle_event(event)
+                        plasma_checkbox, btn_adv_settings]: btn.handle_event(event)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1: wave_input_active = wave_input_box.collidepoint(
                 event.pos)
+        
+        elif game_state == "advanced_settings":
+             btn_adv_back.handle_event(event)
+             # Handle inputs click
+             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                  adv_input_active = None
+                  for key, rect in adv_inputs.items():
+                      if rect.collidepoint(event.pos):
+                          adv_input_active = key
+                          adv_input_str = str(adv_settings[key])
+                  # Check infinite toggle
+                  toggle_rect = pygame.Rect(WIDTH // 2 + 50, HEIGHT // 2 + 80, 40, 40)
+                  if toggle_rect.collidepoint(event.pos):
+                      adv_settings['infinite_health'] = not adv_settings['infinite_health']
         elif game_state == "game":
             if game_paused:
                 for btn in [btn_resume, btn_smooth_camera, btn_toggle_fullscreen, btn_pause_to_main_menu]:
@@ -802,7 +880,7 @@ while running:
         screen.blit(title_surf, title_surf.get_rect(
             center=(WIDTH // 2, HEIGHT // 4 + math.sin(pygame.time.get_ticks() * 0.001) * 10)))
         for btn in [btn_start, btn_fullscreen, btn_quit, btn_custom_start, dash_checkbox, rapid_checkbox,
-                    plasma_checkbox]: btn.draw(screen)
+                    plasma_checkbox, btn_adv_settings]: btn.draw(screen)
 
         screen.blit(font.render("Custom Start Options", True, WHITE), (wave_input_box.x, wave_input_box.y - 30))
         pygame.draw.rect(screen, (50, 50, 50), wave_input_box)
@@ -810,6 +888,37 @@ while running:
         screen.blit(ui_font.render("Wave:", True, WHITE), (wave_input_box.x + 5, wave_input_box.y - 20))
         wave_text_surf = font.render(custom_start_wave_str, True, WHITE);
         screen.blit(wave_text_surf, wave_text_surf.get_rect(center=wave_input_box.center))
+
+    elif game_state == "advanced_settings":
+         screen.fill(BLACK)
+         title = title_font.render("Advanced Settings", True, WHITE)
+         screen.blit(title, title.get_rect(center=(WIDTH // 2, HEIGHT // 5)))
+         
+         labels = {
+             'enemy_health': "Enemy Health Multiplier:",
+             'enemy_firerate': "Enemy Cooldown Multiplier (Lower is faster):",
+             'spawn_count_mult': "Spawn Count Multiplier:"
+         }
+         
+         for key, rect in adv_inputs.items():
+             lbl = ui_font.render(labels[key], True, WHITE)
+             screen.blit(lbl, (rect.x - 300, rect.y + 10))
+             
+             pygame.draw.rect(screen, (50, 50, 50), rect)
+             color = GREEN if adv_input_active == key else (100, 100, 100)
+             pygame.draw.rect(screen, color, rect, 2)
+             
+             txt = adv_input_str if adv_input_active == key else str(adv_settings[key])
+             ts = font.render(txt, True, WHITE)
+             screen.blit(ts, ts.get_rect(center=rect.center))
+
+         # God Mode
+         gm_lbl = ui_font.render("Infinite Health (God Mode):", True, WHITE)
+         screen.blit(gm_lbl, (WIDTH // 2 - 250, HEIGHT // 2 + 90))
+         gm_rect = pygame.Rect(WIDTH // 2 + 50, HEIGHT // 2 + 80, 40, 40)
+         pygame.draw.rect(screen, GREEN if adv_settings['infinite_health'] else RED, gm_rect)
+
+         btn_adv_back.draw(screen)
 
     elif game_state == "splash": 
         if splash_screen_active:
@@ -918,11 +1027,16 @@ while running:
                     boss_fight_active = True;
                     boss_group.add(Boss(MAP_WIDTH / 2, MAP_HEIGHT / 2))
                 else:
-                    enemies_per_wave = 2 + current_wave
+                    enemies_per_wave = int((2 + current_wave) * adv_settings['spawn_count_mult'])
                     for _ in range(enemies_per_wave):
                         map_rect = pygame.Rect((MAP_WIDTH - current_map_size) / 2, (MAP_HEIGHT - current_map_size) / 2,
                                                current_map_size, current_map_size)
-                        enemy_type = random.choice(["charger", "charger", "shooter", "shooter", "sniper", "tank", "kamikaze", "kamikaze", "splitter", "turret"])
+                        
+                        # Weighted Spawn List
+                        # Tank and Turret appearing less often (~5% each approx, vs 10-20% for others)
+                        spawn_pool = ["charger"]*4 + ["shooter"]*4 + ["sniper"]*2 + ["kamikaze"]*4 + ["splitter"]*2 + ["tank"]*1 + ["turret"]*1
+                        enemy_type = random.choice(spawn_pool)
+                        
                         if enemy_type == "turret":
                             # Spawn turrets closer to center (random point in map)
                             x = random.uniform(map_rect.left + 200, map_rect.right - 200)
